@@ -15,7 +15,10 @@
 
 namespace ninfer::ops::detail {
 
-struct alignas(128) Nvfp4W4a4TmaDescriptors {
+// 64 bytes is the alignment the CUDA driver requires of a tensor map; each member sits at a
+// multiple-of-128 offset, so every CUtensorMap stays 64-aligned. MSVC rejects by-value kernel
+// parameters requesting more than 64-byte alignment (C2719), and this struct is passed that way.
+struct alignas(64) Nvfp4W4a4TmaDescriptors {
     CUtensorMap a_codes;
     CUtensorMap b_codes;
     CUtensorMap a_scales;

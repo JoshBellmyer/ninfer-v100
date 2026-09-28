@@ -15,10 +15,14 @@
 #include <unordered_map>
 #include <utility>
 
-#include <fcntl.h>
-#include <sys/mman.h>
-#include <sys/stat.h>
-#include <unistd.h>
+#if defined(_WIN32)
+#    include <windows.h>
+#else
+#    include <fcntl.h>
+#    include <sys/mman.h>
+#    include <sys/stat.h>
+#    include <unistd.h>
+#endif
 
 namespace ninfer::artifact {
 namespace {
@@ -174,6 +178,95 @@ struct TransparentStringHash {
     }
 };
 
+#if defined(_WIN32)
+class MappedFile {
+public:
+    explicit MappedFile(const std::filesystem::path& path) {
+        const HANDLE handle =
+            ::CreateFileW(path.wstring().c_str(), GENERIC_READ,
+                          FILE_SHARE_READ | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, 0, nullptr);
+        if (handle == INVALID_HANDLE_VALUE) {
+            throw std::system_error(::GetLastError(), std::generic_category(),
+                                    "open " + path.string());
+        }
+
+        LARGE_INTEGER size {};
+        if (!::GetFileSizeEx(handle, &size)) {
+            const DWORD error = ::GetLastError();
+            ::CloseHandle(handle);
+            throw std::system_error(static_cast<int>(error), std::generic_category(),
+                                    "fstat " + path.string());
+        }
+        if (size.QuadPart < 0 ||
+            static_cast<std::uintmax_t>(size.QuadPart) > std::numeric_limits<std::size_t>::max()) {
+            ::CloseHandle(handle);
+            throw ArtifactError("artifact size does not fit the process address space");
+        }
+
+        const auto file_size = static_cast<std::size_t>(size.QuadPart);
+        if (file_size != 0) {
+            // Size zero means "the size of the file": a read-only view over the whole artifact,
+            // the analogue of MAP_PRIVATE|PROT_READ.
+            HANDLE mapping = ::CreateFileMappingW(handle, nullptr, PAGE_READONLY, 0, 0, nullptr);
+            void* view     = mapping == nullptr ? nullptr
+                                                : ::MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, 0);
+            if (view == nullptr) {
+                const DWORD error = ::GetLastError();
+                if (mapping != nullptr) { ::CloseHandle(mapping); }
+                ::CloseHandle(handle);
+                throw std::system_error(static_cast<int>(error), std::generic_category(),
+                                        "mmap " + path.string());
+            }
+            mapping_ = mapping;
+            data_    = static_cast<const std::byte*>(view);
+        }
+        handle_ = handle;
+        size_   = file_size;
+    }
+
+    ~MappedFile() {
+        if (data_ != nullptr) { ::UnmapViewOfFile(const_cast<std::byte*>(data_)); }
+        if (mapping_ != nullptr) { ::CloseHandle(mapping_); }
+        if (handle_ != INVALID_HANDLE_VALUE) { ::CloseHandle(handle_); }
+    }
+
+    MappedFile(const MappedFile&)            = delete;
+    MappedFile& operator=(const MappedFile&) = delete;
+
+    const std::byte* data() const noexcept { return data_; }
+
+    std::size_t size() const noexcept { return size_; }
+
+    // Windows has no O_DIRECT; aligned bulk reads go through the normal (cached) file path at an
+    // explicit offset, which preserves the observable contract of this method.
+    std::size_t read_direct(std::uint64_t absolute_offset, std::span<std::byte> destination) const {
+        constexpr std::size_t alignment = Reader::direct_io_alignment;
+        if (absolute_offset % alignment != 0 || destination.size() % alignment != 0 ||
+            reinterpret_cast<std::uintptr_t>(destination.data()) % alignment != 0) {
+            throw ArtifactError("direct artifact read is not 4096-byte aligned");
+        }
+        if (absolute_offset > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
+            throw ArtifactError("direct artifact read exceeds platform I/O limits");
+        }
+
+        OVERLAPPED overlapped {};
+        overlapped.Offset     = static_cast<DWORD>(absolute_offset & 0xFFFFFFFFu);
+        overlapped.OffsetHigh = static_cast<DWORD>(absolute_offset >> 32);
+        DWORD bytes_read      = 0;
+        if (!::ReadFile(handle_, destination.data(),
+                        static_cast<DWORD>(destination.size()), &bytes_read, &overlapped)) {
+            throw std::system_error(::GetLastError(), std::generic_category(), "direct artifact read");
+        }
+        return static_cast<std::size_t>(bytes_read);
+    }
+
+private:
+    HANDLE handle_  = INVALID_HANDLE_VALUE;
+    HANDLE mapping_ = nullptr;
+    const std::byte* data_ = nullptr;
+    std::size_t size_      = 0;
+};
+#else
 class MappedFile {
 public:
     explicit MappedFile(const std::filesystem::path& path) {
@@ -249,6 +342,7 @@ private:
     const std::byte* data_ = nullptr;
     std::size_t size_      = 0;
 };
+#endif // _WIN32
 
 } // namespace
 

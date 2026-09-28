@@ -99,12 +99,15 @@ mean output tokens per round over ten measured rounds after two warmups.
 
 ## Quick start
 
-NInfer requires 64-bit Linux, a Tesla V100 with CUDA Toolkit 12.8, CMake 3.28 or newer, a C++20
-host compiler, Ninja, `pkg-config`, FFmpeg
-development libraries (`libavformat >= 60`, `libavcodec >= 60`, `libavutil >= 58`, and
-`libswscale >= 7`), and `libcurl >= 7.85`. This port builds for `sm_70`.
+NInfer requires a Tesla V100, CUDA Toolkit 12.8 or newer (the last toolkits that still assemble
+Volta device code), CMake 3.28 or newer, and a C++20 host compiler. This port builds for `sm_70`
+on both 64-bit Linux and Windows.
 
-Select CUDA 12.8 and Volta explicitly:
+### Linux
+
+Install FFmpeg development libraries (`libavformat >= 60`, `libavcodec >= 60`,
+`libavutil >= 58`, and `libswscale >= 7`) and `libcurl >= 7.85`, then select CUDA and Volta
+explicitly:
 
 ```bash
 cmake -S . -B build-v100 -G Ninja -DCMAKE_BUILD_TYPE=Release \
@@ -112,6 +115,30 @@ cmake -S . -B build-v100 -G Ninja -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_CUDA_ARCHITECTURES=70
 cmake --build build-v100 -j
 ```
+
+### Windows
+
+The media dependencies are prebuilt win64 shared libraries under a local prefix (default
+`C:\ninfer-deps`, override with the `NINFER_MEDIA_PREFIX` environment variable or cache variables):
+
+- `<prefix>\ffmpeg\{include,lib,bin}` — any FFmpeg win64 **shared** build at least as new as the
+  Linux floor above (for example a BtbN `win64-gpl-shared` release);
+- `<prefix>\curl\{include,lib,bin}` — a curl win64 shared build (`>= 7.85`). The official
+curl.se mingw zips ship an MSVC import library under `lib/x64`; if yours does not, generate one
+  with `lib /def:<dll>.def /machine:x64` from the `.def` file next to the DLL.
+
+Configure and build (Visual Studio 2022 generator; Ninja works too):
+
+```bat
+cmake -S . -B build-winv100 -G "Visual Studio 17 2022" -A x64 ^
+  -DCMAKE_CUDA_ARCHITECTURES=70 -DBUILD_TESTING=ON
+cmake --build build-winv100 --config Release -j
+```
+
+The FFmpeg/curl runtime DLLs are staged next to the executables under `build-winv100\bin`.
+Executables land in that same directory (`build-winv100\bin\ninfer.exe`, ...).
+
+### Both platforms
 
 The same five `.ninfer` artifacts use the public Engine/CLI/serving routes. See the
 [V100 port notes](docs/v100.md) for qualification and the preferred-GPU launcher.

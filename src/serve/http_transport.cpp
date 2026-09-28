@@ -5,6 +5,8 @@
 #if defined(__linux__)
 #    include <netinet/tcp.h>
 #    include <sys/socket.h>
+#elif defined(_WIN32)
+#    include <winsock2.h>
 #endif
 
 #include <stdexcept>
@@ -18,12 +20,12 @@ constexpr int kKeepAliveIdleSeconds                = 10;
 constexpr int kKeepAliveIntervalSeconds            = 3;
 constexpr int kKeepAliveProbeCount                 = 3;
 constexpr unsigned int kTcpUserTimeoutMilliseconds = 15000;
+#endif
 
 template <class T>
 void set_socket_option(socket_t socket, int level, int option, const T& value) noexcept {
     (void)::setsockopt(socket, level, option, &value, sizeof(value));
 }
-#endif
 
 } // namespace
 
@@ -87,6 +89,10 @@ void configure_http_server_socket(socket_t socket) noexcept {
     set_socket_option(socket, IPPROTO_TCP, TCP_KEEPINTVL, kKeepAliveIntervalSeconds);
     set_socket_option(socket, IPPROTO_TCP, TCP_KEEPCNT, kKeepAliveProbeCount);
     set_socket_option(socket, IPPROTO_TCP, TCP_USER_TIMEOUT, kTcpUserTimeoutMilliseconds);
+#elif defined(_WIN32)
+    // Windows exposes only SO_KEEPALIVE; the idle/interval/count knobs are OS-managed.
+    const int enabled = 1;
+    set_socket_option(socket, SOL_SOCKET, SO_KEEPALIVE, enabled);
 #endif
 }
 

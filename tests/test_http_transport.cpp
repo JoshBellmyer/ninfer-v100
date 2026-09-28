@@ -12,6 +12,8 @@
 #    include <netinet/tcp.h>
 #    include <sys/socket.h>
 #    include <unistd.h>
+#elif defined(_WIN32)
+#    include <winsock2.h>
 #endif
 
 namespace {
@@ -154,6 +156,23 @@ public:
 private:
     int descriptor_ = -1;
 };
+#elif defined(_WIN32)
+class Socket final {
+public:
+    explicit Socket(SOCKET handle = INVALID_SOCKET) : handle_(handle) {}
+
+    ~Socket() {
+        if (handle_ != INVALID_SOCKET) { ::closesocket(handle_); }
+    }
+
+    Socket(const Socket&)            = delete;
+    Socket& operator=(const Socket&) = delete;
+
+    [[nodiscard]] SOCKET get() const noexcept { return handle_; }
+
+private:
+    SOCKET handle_ = INVALID_SOCKET;
+};
 
 template <class T>
 bool socket_option_equals(int socket, int level, int option, T expected) {
@@ -207,10 +226,61 @@ int test_inherited_socket_liveness() {
 
 } // namespace
 
+#if defined(_WIN32)
+int test_inherited_socket_liveness() {
+    WSADATA data {};
+    if (::WSAStartup(MAKEWORD(2, 2), &data) != 0) {
+        return check(false, "failed to initialize Winsock for the HTTP liveness test");
+    }
+    int failures = 0;
+    Socket listener(::socket(AF_INET, SOCK_STREAM, 0));
+    if (listener.get() == INVALID_SOCKET) {
+        ::WSACleanup();
+        return check(false, "failed to create HTTP listener test socket");
+    }
+    ninfer::serve::configure_http_server_socket(listener.get());
+
+    sockaddr_in address{};
+    address.sin_family      = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    address.sin_port        = 0;
+    if (::bind(listener.get(), reinterpret_cast<const sockaddr*>(&address), sizeof(address)) != 0 ||
+        ::listen(listener.get(), 1) != 0) {
+        return check(false, "failed to bind HTTP listener test socket");
+    }
+    socklen_t address_size = sizeof(address);
+    if (::getsockname(listener.get(), reinterpret_cast<sockaddr*>(&address), &address_size) != 0) {
+        return check(false, "failed to inspect HTTP listener test address");
+    }
+
+    Socket client(::socket(AF_INET, SOCK_STREAM, 0));
+    if (client.get() == INVALID_SOCKET ||
+        ::connect(client.get(), reinterpret_cast<const sockaddr*>(&address), sizeof(address)) != 0) {
+        return check(false, "failed to connect HTTP liveness test socket");
+    }
+    Socket accepted(::accept(listener.get(), nullptr, nullptr));
+    if (accepted.get() == INVALID_SOCKET) {
+        return check(false, "failed to accept HTTP liveness test socket");
+    }
+
+    int value = 0;
+    int length = sizeof(value);
+    const bool keepalive =
+        ::getsockopt(accepted.get(), SOL_SOCKET, SO_KEEPALIVE, &value, &length) == 0 && value == 1;
+    failures += check(keepalive, "accepted HTTP socket did not inherit SO_KEEPALIVE");
+    ::WSACleanup();
+    return failures;
+}
+#endif
+
+} // namespace
+
 int main() {
     int failures =
         test_sse_transport() + test_sse_response_headers() + test_prompt_json_member_order();
 #if defined(__linux__)
+    failures += test_inherited_socket_liveness();
+#elif defined(_WIN32)
     failures += test_inherited_socket_liveness();
 #endif
     if (failures == 0) { std::cout << "ok\n"; }

@@ -59,6 +59,22 @@ if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release)
 endif()
 
+# The target runtime headers instantiate very large template TUs; MSVC's default
+# per-section object limit is far too small for them. /utf-8 satisfies the bundled fmt
+# unicode static assert and keeps char literals on one encoding.
+if(MSVC)
+  add_compile_options(
+    $<$<COMPILE_LANGUAGE:C,CXX>:/bigobj>
+    $<$<COMPILE_LANGUAGE:C,CXX>:/utf-8>
+    $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/bigobj>
+    $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/utf-8>)
+endif()
+
+# Vendored as a static library: suppress the dllimport export/import decoration.
+if(WIN32)
+  add_compile_definitions(UTF8PROC_STATIC)
+endif()
+
 if(CMAKE_GENERATOR MATCHES "Ninja")
   set_property(GLOBAL PROPERTY JOB_POOLS cuda_link=1)
   set(CMAKE_JOB_POOL_LINK cuda_link)
@@ -100,13 +116,118 @@ if(NINFER_BUILD_APPS OR BUILD_TESTING)
 endif()
 
 find_package(CUDAToolkit REQUIRED)
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET
-  libavformat>=60 libavcodec>=60 libavutil>=58 libswscale>=7)
-if(NINFER_BUILD_MEDIA_ACQUIRE)
-  pkg_check_modules(LIBCURL REQUIRED IMPORTED_TARGET libcurl>=7.85)
-endif()
 find_package(Threads REQUIRED)
+
+# --- Media dependencies (FFmpeg + libcurl) ------------------------------------
+# Linux resolves both through pkg-config. Windows has no pkg-config; prebuilt shared
+# builds are expected under a local prefix (see README "Quick start"):
+#   <prefix>/ffmpeg/{include,lib,bin}  e.g. BtbN FFmpeg-Builds win64 gpl-shared
+#   <prefix>/curl/{include,lib,bin}    e.g. curl/curl win64-share release zip
+# The imported targets keep the pkg-config names so target link lines stay portable.
+if(WIN32)
+  add_compile_definitions(NOMINMAX WIN32_LEAN_AND_MEAN)
+  # One flat output directory keeps the staged runtime DLLs next to every executable.
+  set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/bin)
+
+  if(DEFINED ENV{NINFER_MEDIA_PREFIX})
+    file(TO_CMAKE_PATH "$ENV{NINFER_MEDIA_PREFIX}" ninfer_media_prefix_default)
+  else()
+    set(ninfer_media_prefix_default "C:/ninfer-deps")
+  endif()
+  set(NINFER_FFMPEG_ROOT
+      "${ninfer_media_prefix_default}/ffmpeg"
+      CACHE PATH "Prebuilt Windows FFmpeg root containing include/, lib/, bin/")
+  set(NINFER_CURL_ROOT
+      "${ninfer_media_prefix_default}/curl"
+      CACHE PATH "Prebuilt Windows curl root containing include/, lib/, bin/")
+
+  # --- FFmpeg -----------------------------------------------------------------
+  find_path(NINFER_FFMPEG_INCLUDE_DIR NAMES libavformat/avformat.h
+            HINTS ${NINFER_FFMPEG_ROOT}/include NO_DEFAULT_PATH)
+  foreach(ninfer_ffmpeg_lib IN ITEMS avformat avcodec avutil swscale)
+    string(TOUPPER "${ninfer_ffmpeg_lib}" ninfer_ffmpeg_lib_upper)
+    find_library(NINFER_FFMPEG_${ninfer_ffmpeg_lib_upper}_LIBRARY NAMES ${ninfer_ffmpeg_lib}
+                 PATHS ${NINFER_FFMPEG_ROOT}/lib NO_DEFAULT_PATH)
+  endforeach()
+  if(NOT NINFER_FFMPEG_INCLUDE_DIR
+     OR NOT NINFER_FFMPEG_AVFORMAT_LIBRARY
+     OR NOT NINFER_FFMPEG_AVCODEC_LIBRARY
+     OR NOT NINFER_FFMPEG_AVUTIL_LIBRARY
+     OR NOT NINFER_FFMPEG_SWSCALE_LIBRARY)
+    message(FATAL_ERROR
+      "Windows FFmpeg not found under '${NINFER_FFMPEG_ROOT}'. Install a prebuilt win64 "
+      "shared build (libavformat >= 60, libavcodec >= 60, libavutil >= 58, libswscale >= 7) "
+      "and set -DNINFER_FFMPEG_ROOT to its root (include/, lib/, bin/).")
+  endif()
+
+  # Guard against an FFmpeg older than the API floor used by media/decode. The .pc files
+  # carry the library version on every prebuilt layout (the LIB*_VERSION_MAJOR macros were
+  # removed from the headers in FFmpeg 8).
+  function(ninfer_check_ffmpeg_version component minimum)
+    string(TOLOWER "lib${component}.pc" ninfer_ffmpeg_pc_file)
+    set(ninfer_ffmpeg_pc_path "${NINFER_FFMPEG_ROOT}/lib/pkgconfig/${ninfer_ffmpeg_pc_file}")
+    if(NOT EXISTS "${ninfer_ffmpeg_pc_path}")
+      message(FATAL_ERROR "Missing FFmpeg pkg-config file: ${ninfer_ffmpeg_pc_path}")
+    endif()
+    file(STRINGS "${ninfer_ffmpeg_pc_path}" ninfer_ffmpeg_version_line
+         REGEX "^Version:[ \t]*[0-9]+\.[0-9]+\.[0-9]+")
+    if(NOT ninfer_ffmpeg_version_line)
+      message(FATAL_ERROR "Could not read Version from ${ninfer_ffmpeg_pc_path}")
+    endif()
+    string(REGEX REPLACE ".*Version:[ \t]*([0-9]+)\.[0-9]+\.[0-9]+.*" "\\1"
+           ninfer_ffmpeg_version_major "${ninfer_ffmpeg_version_line}")
+    if(ninfer_ffmpeg_version_major VERSION_LESS ${minimum})
+      message(FATAL_ERROR
+        "FFmpeg ${component} major version ${ninfer_ffmpeg_version_major} is below the "
+        "required minimum ${minimum}")
+    endif()
+  endfunction()
+  ninfer_check_ffmpeg_version(avformat 60)
+  ninfer_check_ffmpeg_version(avcodec 60)
+  ninfer_check_ffmpeg_version(avutil 58)
+  ninfer_check_ffmpeg_version(swscale 7)
+
+  add_library(PkgConfig::FFMPEG INTERFACE IMPORTED)
+  set_target_properties(PkgConfig::FFMPEG PROPERTIES
+    INTERFACE_INCLUDE_DIRECTORIES "${NINFER_FFMPEG_INCLUDE_DIR}"
+    INTERFACE_LINK_LIBRARIES
+      "${NINFER_FFMPEG_AVFORMAT_LIBRARY};${NINFER_FFMPEG_AVCODEC_LIBRARY};${NINFER_FFMPEG_AVUTIL_LIBRARY};${NINFER_FFMPEG_SWSCALE_LIBRARY}")
+  # Stage the runtime DLLs next to every executable (single bin/ output directory).
+  file(GLOB NINFER_FFMPEG_DLLS "${NINFER_FFMPEG_ROOT}/bin/*.dll")
+  if(NOT NINFER_FFMPEG_DLLS)
+    message(FATAL_ERROR "No FFmpeg runtime DLLs found in '${NINFER_FFMPEG_ROOT}/bin'")
+  endif()
+  file(COPY ${NINFER_FFMPEG_DLLS} DESTINATION "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}")
+
+  # --- libcurl ------------------------------------------------------------------
+  if(NINFER_BUILD_MEDIA_ACQUIRE)
+    find_path(NINFER_CURL_INCLUDE_DIR NAMES curl/curl.h
+              HINTS ${NINFER_CURL_ROOT}/include NO_DEFAULT_PATH)
+    find_library(NINFER_CURL_LIBRARY NAMES libcurl curl
+                 PATHS ${NINFER_CURL_ROOT}/lib/x64 ${NINFER_CURL_ROOT}/lib NO_DEFAULT_PATH)
+    if(NOT NINFER_CURL_INCLUDE_DIR OR NOT NINFER_CURL_LIBRARY)
+      message(FATAL_ERROR
+        "Windows libcurl not found under '${NINFER_CURL_ROOT}'. Install a prebuilt win64 "
+        "shared build (>= 7.85) and set -DNINFER_CURL_ROOT to its root (include/, lib/, bin/).")
+    endif()
+    add_library(PkgConfig::LIBCURL INTERFACE IMPORTED)
+    set_target_properties(PkgConfig::LIBCURL PROPERTIES
+      INTERFACE_INCLUDE_DIRECTORIES "${NINFER_CURL_INCLUDE_DIR}"
+      INTERFACE_LINK_LIBRARIES "${NINFER_CURL_LIBRARY}")
+    file(GLOB NINFER_CURL_DLLS "${NINFER_CURL_ROOT}/bin/*.dll")
+    if(NOT NINFER_CURL_DLLS)
+      message(FATAL_ERROR "No curl runtime DLLs found in '${NINFER_CURL_ROOT}/bin'")
+    endif()
+    file(COPY ${NINFER_CURL_DLLS} DESTINATION "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}")
+  endif()
+else()
+  find_package(PkgConfig REQUIRED)
+  pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET
+    libavformat>=60 libavcodec>=60 libavutil>=58 libswscale>=7)
+  if(NINFER_BUILD_MEDIA_ACQUIRE)
+    pkg_check_modules(LIBCURL REQUIRED IMPORTED_TARGET libcurl>=7.85)
+  endif()
+endif()
 
 if(NINFER_BUILD_APPS OR BUILD_TESTING)
   # Product operational logging is an offline, repository-pinned dependency. Core-only builds do

@@ -1,3 +1,5 @@
+#include "core/platform.h"
+
 #include "serve/operational_log.h"
 #include "serve/request_log.h"
 
@@ -12,8 +14,6 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
-
-#include <unistd.h>
 
 namespace {
 
@@ -667,8 +667,7 @@ int main() {
 
     const std::filesystem::path log_path =
         std::filesystem::temp_directory_path() /
-        ("ninfer-request-log-test-" + std::to_string(static_cast<long long>(::getpid())) +
-         ".jsonl");
+        ("ninfer-request-log-test-" + std::to_string(ninfer::platform::process_id()) + ".jsonl");
     std::filesystem::remove(log_path);
     {
         JsonlRequestLog writer(log_path.string());

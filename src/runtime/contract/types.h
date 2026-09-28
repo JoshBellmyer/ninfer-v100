@@ -2,6 +2,7 @@
 
 #include "core/nvtx.h"
 #include "core/transfer_work.h"
+#include "core/u128.h"
 #include "ninfer/types.h"
 
 #include <atomic>
@@ -244,12 +245,12 @@ struct PrefillWork {
     result.tokens                       = suffix_tokens;
     result.vision_items                 = vision_items;
     result.vision_patches               = vision_patches;
-    const unsigned __int128 suffix      = suffix_tokens;
-    const unsigned __int128 linear      = static_cast<unsigned __int128>(prefix_tokens) * suffix;
-    const unsigned __int128 triangular  = suffix * (suffix + 1U) / 2U;
-    constexpr unsigned __int128 maximum = ~static_cast<unsigned __int128>(0);
-    const unsigned __int128 attention =
-        triangular > maximum - linear ? maximum : linear + triangular;
+    const U128 suffix     = suffix_tokens;
+    const U128 linear     = static_cast<U128>(prefix_tokens) * suffix;
+    // Unsigned division by two is an exact right shift.
+    const U128 triangular = (suffix * (suffix + 1U)) >> 1;
+    constexpr U128 maximum = U128::max_value();
+    const U128 attention   = triangular > maximum - linear ? maximum : linear + triangular;
     result.attention_pairs = attention > std::numeric_limits<std::uint64_t>::max()
                                  ? std::numeric_limits<std::uint64_t>::max()
                                  : static_cast<std::uint64_t>(attention);

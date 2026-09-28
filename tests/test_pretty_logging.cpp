@@ -3,7 +3,12 @@
 
 #include <spdlog/logger.h>
 
-#include <unistd.h>
+#if defined(_WIN32)
+#    include <io.h>
+#    include <process.h>
+#else
+#    include <unistd.h>
+#endif
 
 #include <algorithm>
 #include <array>
@@ -17,36 +22,53 @@
 
 namespace {
 
+#if defined(_WIN32)
+// MSVC CRT file descriptors: the same dup/pipe mechanics as POSIX, underscore-prefixed.
+using ::_close;
+using ::_dup;
+using ::_dup2;
+using ::_read;
+#else
+using ::close;
+using ::dup;
+using ::dup2;
+using ::read;
+#endif
+
 class StderrCapture {
 public:
     StderrCapture() {
+#if defined(_WIN32)
+        if (_pipe(pipe_, 0, _O_BINARY) != 0) { throw std::runtime_error(std::strerror(errno)); }
+#else
         if (::pipe(pipe_) != 0) { throw std::runtime_error(std::strerror(errno)); }
-        saved_ = ::dup(STDERR_FILENO);
-        if (saved_ < 0 || ::dup2(pipe_[1], STDERR_FILENO) < 0) {
+#endif
+        saved_ = dup(STDERR_FILENO);
+        if (saved_ < 0 || dup2(pipe_[1], STDERR_FILENO) < 0) {
             throw std::runtime_error(std::strerror(errno));
         }
-        ::close(pipe_[1]);
+        close(pipe_[1]);
         pipe_[1] = -1;
     }
 
     ~StderrCapture() {
         if (saved_ >= 0) {
-            (void)::dup2(saved_, STDERR_FILENO);
-            ::close(saved_);
+            (void)dup2(saved_, STDERR_FILENO);
+            close(saved_);
         }
-        if (pipe_[0] >= 0) { ::close(pipe_[0]); }
+        if (pipe_[0] >= 0) { close(pipe_[0]); }
     }
 
     std::string finish() {
         std::fflush(stderr);
-        if (::dup2(saved_, STDERR_FILENO) < 0) { throw std::runtime_error(std::strerror(errno)); }
-        ::close(saved_);
+        if (dup2(saved_, STDERR_FILENO) < 0) { throw std::runtime_error(std::strerror(errno)); }
+        close(saved_);
         saved_ = -1;
 
         std::string output;
         std::array<char, 4096> buffer{};
         for (;;) {
-            const ssize_t count = ::read(pipe_[0], buffer.data(), buffer.size());
+            const auto count = read(pipe_[0], buffer.data(), static_cast<int>(buffer.size()));
             if (count == 0) { break; }
             if (count < 0) {
                 if (errno == EINTR) { continue; }
@@ -54,8 +76,14 @@ public:
             }
             output.append(buffer.data(), static_cast<std::size_t>(count));
         }
-        ::close(pipe_[0]);
+        close(pipe_[0]);
         pipe_[0] = -1;
+#if defined(_WIN32)
+        // C stdio writes stderr in text mode, so captured newlines arrive as CRLF.
+        for (std::size_t index = 0; index + 1 < output.size(); ++index) {
+            if (output[index] == '\r' && output[index + 1] == '\n') { output.erase(index, 1); }
+        }
+#endif
         return output;
     }
 

@@ -1,11 +1,11 @@
 #include "product/logging/logging.h"
 
+#include "core/platform.h"
+
 #include <spdlog/formatter.h>
 #include <spdlog/logger.h>
 #include <spdlog/sinks/sink.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
-
-#include <unistd.h>
 
 #include <atomic>
 #include <chrono>
@@ -101,7 +101,11 @@ public:
             const std::time_t wall_seconds = std::chrono::system_clock::to_time_t(
                 std::chrono::system_clock::time_point(whole_seconds));
             std::tm local{};
+#if defined(_WIN32)
+            (void)_localtime_s(&local, &wall_seconds);
+#else
             localtime_r(&wall_seconds, &local);
+#endif
             fmt::format_to(std::back_inserter(destination),
                            "{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:03}  ", local.tm_year + 1900,
                            local.tm_mon + 1, local.tm_mday, local.tm_hour, local.tm_min,
@@ -151,7 +155,7 @@ void report_logging_error(const std::string& message) noexcept {
 class ProgressAwareStderrSink final : public spdlog::sinks::sink {
 public:
     explicit ProgressAwareStderrSink(spdlog::color_mode color)
-        : sink_(color), interactive_(::isatty(STDERR_FILENO) == 1) {}
+        : sink_(color), interactive_(ninfer::platform::stderr_is_interactive()) {}
 
     ~ProgressAwareStderrSink() override { clear(); }
 

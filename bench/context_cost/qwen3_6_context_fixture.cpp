@@ -6,6 +6,7 @@
 #include "core/host_kv_arena.h"
 #include "core/layout.h"
 #include "core/paged_kv_cache.h"
+#include "core/u128.h"
 #include "ninfer/engine.h"
 #include <ninfer/targets/qwen3_6_27b/package.h>
 #include <ninfer/targets/qwen3_6_35b_a3b/package.h>
@@ -399,8 +400,10 @@ std::vector<TextCase> text_cases(std::uint32_t chunk) {
 }
 
 std::uint64_t attention_pairs(std::uint32_t prefix, std::uint32_t suffix) {
-    const unsigned __int128 pairs = static_cast<unsigned __int128>(prefix) * suffix +
-                                    static_cast<unsigned __int128>(suffix) * (suffix + 1ULL) / 2U;
+    const U128 linear     = static_cast<U128>(prefix) * suffix;
+    // Unsigned division by two is an exact right shift.
+    const U128 triangular = (static_cast<U128>(suffix) * (suffix + 1ULL)) >> 1;
+    const U128 pairs      = linear + triangular;
     if (pairs > std::numeric_limits<std::uint64_t>::max()) {
         throw std::overflow_error("prefill attention-pair count exceeds uint64");
     }
