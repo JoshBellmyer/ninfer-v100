@@ -164,7 +164,7 @@ std::string timestamp() {
     const std::time_t now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
     std::tm utc{};
 #if defined(_WIN32)
-    (void)_gmtime_s(&utc, &now);
+    (void)gmtime_s(&utc, &now);
 #else
     gmtime_r(&now, &utc);
 #endif

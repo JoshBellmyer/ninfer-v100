@@ -7,6 +7,10 @@
 #include <spdlog/sinks/sink.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
 
+#if defined(_WIN32)
+#include <time.h>
+#endif
+
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -102,7 +106,7 @@ public:
                 std::chrono::system_clock::time_point(whole_seconds));
             std::tm local{};
 #if defined(_WIN32)
-            (void)_localtime_s(&local, &wall_seconds);
+            (void)localtime_s(&local, &wall_seconds);
 #else
             localtime_r(&wall_seconds, &local);
 #endif

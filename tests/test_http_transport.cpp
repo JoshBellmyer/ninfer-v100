@@ -174,54 +174,6 @@ private:
     SOCKET handle_ = INVALID_SOCKET;
 };
 
-template <class T>
-bool socket_option_equals(int socket, int level, int option, T expected) {
-    T actual{};
-    socklen_t size = sizeof(actual);
-    return ::getsockopt(socket, level, option, &actual, &size) == 0 && size == sizeof(actual) &&
-           actual == expected;
-}
-
-int test_inherited_socket_liveness() {
-    int failures = 0;
-    Socket listener(::socket(AF_INET, SOCK_STREAM, 0));
-    if (listener.get() < 0) { return check(false, "failed to create HTTP listener test socket"); }
-    ninfer::serve::configure_http_server_socket(listener.get());
-
-    sockaddr_in address{};
-    address.sin_family      = AF_INET;
-    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    address.sin_port        = 0;
-    if (::bind(listener.get(), reinterpret_cast<const sockaddr*>(&address), sizeof(address)) != 0 ||
-        ::listen(listener.get(), 1) != 0) {
-        return check(false, "failed to bind HTTP listener test socket");
-    }
-    socklen_t address_size = sizeof(address);
-    if (::getsockname(listener.get(), reinterpret_cast<sockaddr*>(&address), &address_size) != 0) {
-        return check(false, "failed to inspect HTTP listener test address");
-    }
-
-    Socket client(::socket(AF_INET, SOCK_STREAM, 0));
-    if (client.get() < 0 || ::connect(client.get(), reinterpret_cast<const sockaddr*>(&address),
-                                      sizeof(address)) != 0) {
-        return check(false, "failed to connect HTTP liveness test socket");
-    }
-    Socket accepted(::accept(listener.get(), nullptr, nullptr));
-    if (accepted.get() < 0) { return check(false, "failed to accept HTTP liveness test socket"); }
-
-    failures += check(socket_option_equals(accepted.get(), SOL_SOCKET, SO_KEEPALIVE, 1),
-                      "accepted HTTP socket did not inherit SO_KEEPALIVE");
-    failures += check(socket_option_equals(accepted.get(), IPPROTO_TCP, TCP_KEEPIDLE, 10),
-                      "accepted HTTP socket did not inherit TCP_KEEPIDLE");
-    failures += check(socket_option_equals(accepted.get(), IPPROTO_TCP, TCP_KEEPINTVL, 3),
-                      "accepted HTTP socket did not inherit TCP_KEEPINTVL");
-    failures += check(socket_option_equals(accepted.get(), IPPROTO_TCP, TCP_KEEPCNT, 3),
-                      "accepted HTTP socket did not inherit TCP_KEEPCNT");
-    failures += check(
-        socket_option_equals<unsigned int>(accepted.get(), IPPROTO_TCP, TCP_USER_TIMEOUT, 15000U),
-        "accepted HTTP socket did not inherit TCP_USER_TIMEOUT");
-    return failures;
-}
 #endif
 
 } // namespace
@@ -265,15 +217,15 @@ int test_inherited_socket_liveness() {
 
     int value = 0;
     int length = sizeof(value);
-    const bool keepalive =
-        ::getsockopt(accepted.get(), SOL_SOCKET, SO_KEEPALIVE, &value, &length) == 0 && value == 1;
+    // Windows getsockopt takes a char* buffer where POSIX takes void*.
+    const bool keepalive = ::getsockopt(accepted.get(), SOL_SOCKET, SO_KEEPALIVE,
+                                        reinterpret_cast<char*>(&value), &length) == 0 &&
+                           value == 1;
     failures += check(keepalive, "accepted HTTP socket did not inherit SO_KEEPALIVE");
     ::WSACleanup();
     return failures;
 }
 #endif
-
-} // namespace
 
 int main() {
     int failures =

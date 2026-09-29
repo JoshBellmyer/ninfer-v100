@@ -115,6 +115,13 @@ if(NINFER_BUILD_APPS OR BUILD_TESTING)
   set(NINFER_BUILD_SERVE ON)
 endif()
 
+# Link the shared CUDA runtime into every executable. With CMAKE_CUDA_RUNTIME_LIBRARY
+# unset, CMake appends the static pair (cudadevrt;cudart_static) to each Windows link line,
+# which collides with the shared cudart already linked through CUDA::cudart (LNK2005).
+if(WIN32)
+  set(CMAKE_CUDA_RUNTIME_LIBRARY "Shared")
+endif()
+
 find_package(CUDAToolkit REQUIRED)
 find_package(Threads REQUIRED)
 
@@ -192,12 +199,12 @@ if(WIN32)
     INTERFACE_INCLUDE_DIRECTORIES "${NINFER_FFMPEG_INCLUDE_DIR}"
     INTERFACE_LINK_LIBRARIES
       "${NINFER_FFMPEG_AVFORMAT_LIBRARY};${NINFER_FFMPEG_AVCODEC_LIBRARY};${NINFER_FFMPEG_AVUTIL_LIBRARY};${NINFER_FFMPEG_SWSCALE_LIBRARY}")
-  # Stage the runtime DLLs next to every executable (single bin/ output directory).
+  # Stage the runtime DLLs next to every executable at build time (ninfer_stage_runtime_dlls).
   file(GLOB NINFER_FFMPEG_DLLS "${NINFER_FFMPEG_ROOT}/bin/*.dll")
   if(NOT NINFER_FFMPEG_DLLS)
     message(FATAL_ERROR "No FFmpeg runtime DLLs found in '${NINFER_FFMPEG_ROOT}/bin'")
   endif()
-  file(COPY ${NINFER_FFMPEG_DLLS} DESTINATION "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}")
+  set(NINFER_RUNTIME_DLLS ${NINFER_FFMPEG_DLLS})
 
   # --- libcurl ------------------------------------------------------------------
   if(NINFER_BUILD_MEDIA_ACQUIRE)
@@ -218,8 +225,21 @@ if(WIN32)
     if(NOT NINFER_CURL_DLLS)
       message(FATAL_ERROR "No curl runtime DLLs found in '${NINFER_CURL_ROOT}/bin'")
     endif()
-    file(COPY ${NINFER_CURL_DLLS} DESTINATION "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}")
+    list(APPEND NINFER_RUNTIME_DLLS ${NINFER_CURL_DLLS})
   endif()
+
+  # Multi-config generators (Visual Studio) place executables under bin/<Config>/; stage the DLLs
+  # there at build time so every executable can load them.
+  if(CMAKE_CONFIGURATION_TYPES)
+    set(NINFER_RUNTIME_DLL_DIR "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/$<CONFIG>")
+  else()
+    set(NINFER_RUNTIME_DLL_DIR "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}")
+  endif()
+  add_custom_target(ninfer_stage_runtime_dlls ALL
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${NINFER_RUNTIME_DLL_DIR}"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${NINFER_RUNTIME_DLLS} "${NINFER_RUNTIME_DLL_DIR}"
+    COMMENT "Staging FFmpeg/curl runtime DLLs next to the executables"
+    VERBATIM)
 else()
   find_package(PkgConfig REQUIRED)
   pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET

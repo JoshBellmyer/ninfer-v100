@@ -24,7 +24,8 @@ constexpr unsigned int kTcpUserTimeoutMilliseconds = 15000;
 
 template <class T>
 void set_socket_option(socket_t socket, int level, int option, const T& value) noexcept {
-    (void)::setsockopt(socket, level, option, &value, sizeof(value));
+    // Windows setsockopt takes const char* where POSIX takes const void*.
+    (void)::setsockopt(socket, level, option, reinterpret_cast<const char*>(&value), sizeof(value));
 }
 
 } // namespace

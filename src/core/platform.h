@@ -3,6 +3,7 @@
 #pragma once
 
 #include <cstdint>
+#include <initializer_list>
 
 #if defined(_WIN32)
 #    include <process.h>
