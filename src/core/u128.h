@@ -41,10 +41,34 @@ struct U128 {
                     std::numeric_limits<std::uint64_t>::max()};
     }
 
-    // Multiplication is only defined for 64-bit operands; wider values would silently lose bits.
+    // Full 128-bit product of two 128-bit values; throws only when the result does not fit in
+    // 128 bits. This matches unsigned __int128 semantics for every product that fits (e.g.
+    // (2^64-1) * 2^64), which expressions such as suffix * (suffix + 1) rely on at the top end.
     [[nodiscard]] friend constexpr U128 operator*(U128 left, U128 right) {
-        if (left.hi != 0 || right.hi != 0) { throw std::overflow_error("U128 operand exceeds 64 bits"); }
-        return multiply(left.lo, right.lo);
+        if (left.hi == 0 && right.hi == 0) { return multiply(left.lo, right.lo); }
+
+        // Product = p0 + (p1 + p2) * 2^64 + p3 * 2^128; assemble the upper limbs and require
+        // them to be zero so the result fits in 128 bits.
+        const U128 p0 = multiply(left.lo, right.lo);
+        const U128 p1 = multiply(left.lo, right.hi);
+        const U128 p2 = multiply(left.hi, right.lo);
+        const U128 p3 = multiply(left.hi, right.hi);
+
+        std::uint64_t sum   = p0.hi + p1.lo;
+        std::uint64_t carry = sum < p0.hi ? 1u : 0u;
+        const std::uint64_t limb1 = (sum += p2.lo);
+        carry += sum < p2.lo ? 1u : 0u;
+
+        sum   = p1.hi + p2.hi;
+        const std::uint64_t carry_hi = sum < p1.hi ? 1u : 0u;
+        sum += p3.lo;
+        const std::uint64_t carry_mid = carry_hi + (sum < p3.lo ? 1u : 0u);
+        const std::uint64_t limb2     = sum + carry;
+
+        if (limb2 != 0 || limb2 < sum || carry_mid != 0 || p3.hi != 0) {
+            throw std::overflow_error("U128 product exceeds 128 bits");
+        }
+        return U128{p0.lo, limb1};
     }
 
     [[nodiscard]] friend constexpr U128 operator+(U128 left, U128 right) noexcept {
